@@ -1,0 +1,17 @@
+[project]
+name = "cabled-drone"
+version = "0.1.0"
+description = "MuJoCo simulation of a quadrotor linked by cables: rigid pendulums, a flexible rope, and a rope tethered to the ground."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mujoco>=3.0",
+    "numpy>=1.24",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["sim"]
