@@ -1,8 +1,8 @@
-"""CabledDrone : simulation MuJoCo d'un drone quadrirotor (Skydio X2) relié par des câbles.
+"""CabledDrone: MuJoCo simulation of a quadrotor (Skydio X2) linked by cables.
 
-Le modèle MJCF (x2.xml + scene.xml) est une copie de celui de
-mujoco_menagerie/skydio_x2. Le script lance une simulation temps réel avec
-le viewer MuJoCo, pilotée par la loi de commande choisie via `--controller`.
+The MJCF model (x2.xml + scene.xml) comes from mujoco_menagerie/skydio_x2.
+The script runs a real-time simulation in the MuJoCo viewer, driven by the
+control law selected with `--controller`.
 """
 
 from __future__ import annotations
@@ -26,38 +26,38 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PayloadParams:
-    """Charge suspendue sous le drone : une chaîne de tiges rigides terminée par une sphère.
+    """Load hanging under the drone: a chain of rigid rods ending in a sphere.
 
-    Chaque tige est reliée à la précédente (la première au drone) par une
-    liaison rotule (3 rotations libres, sans amortissement). Avec une tige,
-    c'est un pendule sphérique ; avec deux, un double pendule sphérique,
-    dont le mouvement est chaotique. La première rotule est au centre du
-    dessous du drone, ~5 cm sous son centre de masse.
+    Each rod is linked to the previous one (the first one to the drone) by a
+    ball joint (3 free rotations, no damping). With one rod, it is a
+    spherical pendulum; with two, a double spherical pendulum, whose motion
+    is chaotic. The first ball joint is at the center of the drone's
+    underside, ~5 cm below its center of mass.
     """
 
     rod_count: int = 1
-    rod_length: float = 0.5  # m, longueur de chaque tige
+    rod_length: float = 0.5  # m, length of each rod
     rod_radius: float = 0.005  # m
-    rod_mass: float = 0.02  # kg, masse de chaque tige
+    rod_mass: float = 0.02  # kg, mass of each rod
     sphere_radius: float = 0.05  # m
     sphere_mass: float = 0.3  # kg
-    ground_clearance: float = 0.1  # m, hauteur de la sphère au-dessus du sol au départ
-    # Pas de simulation imposé avec une charge (x2.xml : 0.01 s). Une tige fine n'a quasiment pas
-    # d'inertie autour de son axe (~2.5e-7 kg·m²) : avec deux tiges, la tige intermédiaire, sans sphère
-    # pour l'alourdir, fait diverger la simulation à 0.01 s (NaN, drone retourné dès 0.8 kg).
+    ground_clearance: float = 0.1  # m, height of the sphere above the ground at start
+    # Simulation timestep forced when a payload is present (x2.xml: 0.01 s). A thin rod has almost no
+    # inertia around its own axis (~2.5e-7 kg·m²): with two rods, the intermediate rod, with no sphere
+    # to weigh it down, made the simulation blow up at 0.01 s (NaN, drone flipped over from 0.8 kg).
     timestep: float = 0.002  # s
 
     @property
     def total_length(self) -> float:
-        """Distance verticale entre le dessous du drone et le bas de la sphère, chaîne au repos."""
+        """Vertical distance from the drone's underside to the bottom of the sphere, chain at rest."""
         return self.rod_count * self.rod_length + self.sphere_radius
 
 
 def add_payload(spec: mujoco.MjSpec, payload: PayloadParams) -> None:
-    """Ajoute la chaîne de tiges et la sphère au drone "x2", et adapte le keyframe "hover"."""
+    """Add the chain of rods and the sphere to the "x2" drone, and adapt the "hover" keyframe."""
     parent, attach_pos = spec.body("x2"), [0, 0, 0]
     for i in range(1, payload.rod_count + 1):
-        # chaque tige pend sous son parent, rotule à son extrémité haute
+        # each rod hangs below its parent, with the ball joint at its upper end
         link = parent.add_body(name=f"payload_link{i}", pos=attach_pos)
         link.add_joint(name=f"payload_ball{i}", type=mujoco.mjtJoint.mjJNT_BALL)
         rod = link.add_geom(
@@ -81,8 +81,8 @@ def add_payload(spec: mujoco.MjSpec, payload: PayloadParams) -> None:
 
     spec.option.timestep = min(spec.option.timestep, payload.timestep)
 
-    # keyframe : ajoute l'orientation de chaque rotule (quaternion identité = tige verticale)
-    # et monte le drone pour que la sphère ne touche pas le sol au départ
+    # keyframe: add the orientation of each ball joint (identity quaternion = vertical rod)
+    # and raise the drone so the sphere doesn't touch the ground at start
     hover = spec.key("hover")
     qpos = list(hover.qpos)
     qpos[2] = max(qpos[2], payload.total_length + payload.ground_clearance)
@@ -91,51 +91,51 @@ def add_payload(spec: mujoco.MjSpec, payload: PayloadParams) -> None:
 
 @dataclass
 class RopeParams:
-    """Corde souple accrochée sous le drone, masse répartie uniformément sur sa longueur.
+    """Flexible rope attached under the drone, with its mass spread evenly along its length.
 
-    Modélisée par un `flexcomp` 1D : une chaîne de points matériels (sans
-    orientation) reliés par des segments de longueur imposée. La corde n'a
-    donc aucune raideur en flexion ni en torsion, comme une vraie corde.
+    Modeled by a 1D `flexcomp`: a chain of point masses (with no
+    orientation) linked by segments of fixed length. The rope therefore has
+    no bending or twisting stiffness at all, like a real rope.
 
-    Elle est accrochée au drone par une liaison ponctuelle (`connect` :
-    3 translations bloquées, aucune rotation) : comme un nœud, elle ne
-    transmet que la traction. Une rotule ajouterait la rotation de la corde
-    autour de son propre axe, sans signification physique pour une corde et
-    d'inertie quasi nulle (cause de la divergence du double pendule rigide).
+    It is attached to the drone by a point attachment (`connect`: 3
+    translations blocked, no rotation): like a knot, it only transmits
+    tension. A ball joint would add the rotation of the rope around its own
+    axis, which has no physical meaning for a rope and almost zero inertia
+    (the cause of the rigid double pendulum blowing up).
 
-    Avec `anchored`, l'autre extrémité est épinglée au sol (là où elle repose
-    au départ) : le drone ne peut alors pas s'éloigner de l'ancre de plus
-    de la longueur de la corde.
+    With `anchored`, the other end is pinned to the ground (where it lies at
+    start): the drone then can't move further from the anchor than the rope
+    length.
     """
 
     length: float = 1.0  # m
     anchored: bool = False
-    mass: float = 0.2  # kg, répartie uniformément sur les points
-    point_count: int = 21  # points matériels, soit point_count - 1 segments
-    radius: float = 0.006  # m, rayon de collision et d'affichage
-    attach_offset: float = -0.01  # m, accroche sous l'origine du drone (évite le contact permanent avec sa coque)
-    # Résistance de l'air, en N·s/m par mètre de corde, appliquée sur chaque point : sans elle, la corde
-    # oscille indéfiniment. Avec 0.1, une oscillation s'éteint en quelques secondes.
+    mass: float = 0.2  # kg, spread evenly over the points
+    point_count: int = 21  # point masses, i.e. point_count - 1 segments
+    radius: float = 0.006  # m, collision and display radius
+    attach_offset: float = -0.01  # m, attachment below the drone's origin (avoids constant contact with its hull)
+    # Air drag, in N·s/m per meter of rope, applied to each point: without it, the rope keeps
+    # swinging forever. With 0.1, a swing dies out in a few seconds.
     drag: float = 0.1
-    # Contraintes de longueur des segments et d'accroche. Les contraintes MuJoCo sont « souples », et leur
-    # raideur dépend de la masse en jeu : avec les valeurs par défaut (solref 0.02), un point de 10 g qui
-    # porte tout le poids de la corde laissait le premier segment s'allonger de 8 %. Avec ces valeurs,
-    # l'allongement reste sous 0.3 %. solref doit rester supérieur à 2 * timestep.
+    # Segment length and attachment constraints. MuJoCo constraints are "soft", and their stiffness
+    # depends on the masses involved: with the default values (solref 0.02), a 10 g point carrying the
+    # weight of the whole rope let the first segment stretch by 8 %. With these values, stretch stays
+    # under 0.3 %. solref must stay above 2 * timestep.
     solref: str = "0.004 1"
     solimp: str = "0.99 0.999 0.001"
     timestep: float = 0.002  # s
 
 
-# Corde ancrée : plus longue par défaut, pour laisser au drone de la marge autour de l'ancre.
+# Tethered rope: longer by default, to give the drone room around the anchor.
 ANCHORED_ROPE_LENGTH = 2.0  # m
 
 
 def rope_points(rope: RopeParams, top: np.ndarray) -> np.ndarray:
-    """Forme initiale de la corde : verticale sous le point d'accroche `top` jusqu'au sol, le reste posé au sol.
+    """Initial rope shape: vertical below the attachment point `top` down to the ground, the rest lying on it.
 
-    La longueur au repos de chaque segment est celle de la forme initiale : tous
-    les segments doivent donc y avoir la même longueur. Le segment du coude
-    descend en diagonale jusqu'au sol pour respecter cette longueur.
+    The rest length of each segment is taken from the initial shape, so all
+    segments must have the same length in it. The segment at the corner goes
+    down diagonally to the ground to keep that length.
     """
     segment = rope.length / (rope.point_count - 1)
     vertical_count = min(int((top[2] - rope.radius) // segment), rope.point_count - 1)
@@ -153,19 +153,19 @@ def rope_points(rope: RopeParams, top: np.ndarray) -> np.ndarray:
 
 
 def rope_mjcf(rope: RopeParams, top: np.ndarray) -> str:
-    """MJCF qui inclut scene.xml et y ajoute la corde, accrochée au drone.
+    """MJCF that includes scene.xml and adds the rope to it, attached to the drone.
 
-    Un `flexcomp` n'existe que dans le format XML : MjSpec ne sait pas en
-    créer, et le greffer depuis un autre MjSpec (`attach`) perd ses
-    contraintes. On génère donc ce MJCF sous forme de texte.
+    A `flexcomp` only exists in the XML format: MjSpec can't create one, and
+    grafting it from another MjSpec (`attach`) loses its constraints. This
+    MJCF is therefore generated as text.
     """
     points = rope_points(rope, top)
     point = " ".join(f"{x:.6f} {y:.6f} {z:.6f}" for x, y, z in points)
     element = " ".join(f"{i} {i + 1}" for i in range(rope.point_count - 1))
     pin_xml = anchor_xml = ""
     if rope.anchored:
-        # dernier point épinglé : flexcomp ne lui crée pas de corps, il est fixé au monde.
-        # Le plot sombre (sans collision) ne sert qu'à voir l'ancre dans le viewer.
+        # last point pinned: flexcomp creates no body for it, it is fixed to the world.
+        # The dark post (no collision) only shows the anchor in the viewer.
         anchor_x, anchor_y, _ = points[-1]
         pin_xml = f'''
       <pin id="{rope.point_count - 1}"/>'''
@@ -173,7 +173,7 @@ def rope_mjcf(rope: RopeParams, top: np.ndarray) -> str:
     <geom name="rope_anchor" type="cylinder" size=".03 .01" pos="{anchor_x:.6f} {anchor_y:.6f} .01"
           rgba=".2 .2 .2 1" contype="0" conaffinity="0"/>'''
     return f"""<mujoco>
-  <!-- chemins absolus : sans fichier d'origine, MuJoCo ne retrouve pas les dossiers relatifs -->
+  <!-- absolute paths: without an original file, MuJoCo can't resolve relative directories -->
   <compiler assetdir="{os.path.join(BASE_DIR, "assets")}"/>
   <include file="{SCENE_PATH}"/>
   <worldbody>
@@ -189,93 +189,93 @@ def rope_mjcf(rope: RopeParams, top: np.ndarray) -> str:
 
 
 def build_model(payload: PayloadParams | None = None, rope: RopeParams | None = None) -> mujoco.MjModel:
-    """Compile scene.xml, avec la charge rigide (`payload`) ou la corde (`rope`) si fournie."""
+    """Compile scene.xml, with the rigid payload (`payload`) or the rope (`rope`) if given."""
     if rope is None:
         spec = mujoco.MjSpec.from_file(SCENE_PATH)
         if payload is not None:
             add_payload(spec, payload)
         return spec.compile()
 
-    # La liaison `connect` relie les deux corps dans leur position de référence (qpos0), où le drone est
-    # à la position de son corps dans x2.xml. On y place le drone à sa position de départ (keyframe
-    # "hover"), pour que la corde, construite sous ce point de départ, y soit déjà accrochée.
-    scene_spec = mujoco.MjSpec.from_file(SCENE_PATH)  # garder une référence : les vecteurs lus pointent dans sa mémoire
+    # The `connect` equality links the two bodies in their reference configuration (qpos0), where the
+    # drone sits at its body position from x2.xml. The drone is moved there to its start position
+    # (keyframe "hover"), so that the rope, built below that start point, is already attached to it.
+    scene_spec = mujoco.MjSpec.from_file(SCENE_PATH)  # keep a reference: the vectors read point into its memory
     start = np.array(scene_spec.key("hover").qpos)[:3]
     spec = mujoco.MjSpec.from_string(rope_mjcf(rope, start + [0, 0, rope.attach_offset]))
     spec.body("x2").pos = start
     spec.option.timestep = min(spec.option.timestep, rope.timestep)
     damping = rope.drag * rope.length / rope.point_count
-    for joint in spec.joints:  # les 3 glissières de chaque point de la corde (sans nom, créées par flexcomp)
+    for joint in spec.joints:  # the 3 slide joints of each rope point (unnamed, created by flexcomp)
         if joint.parent.name.startswith("rope_"):
             joint.damping = [damping, 0, 0]
     return spec.compile()
 
 
-# Une loi de commande renvoie les poussées des 4 rotors (N), dans l'ordre thrust1..thrust4.
+# A control law returns the thrusts of the 4 rotors (N), in the order thrust1..thrust4.
 Controller = Callable[[mujoco.MjModel, mujoco.MjData], np.ndarray]
 
 
 def hover_control(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
-    """Poussée constante du keyframe "hover" : compense exactement le poids, en boucle ouverte.
+    """Constant thrust from the "hover" keyframe: exactly balances the weight, open loop.
 
-    Aucun retour d'état : la moindre perturbation (ex. une force appliquée
-    dans le viewer) fait dériver le drone.
+    No state feedback: the slightest disturbance (e.g. a force applied in
+    the viewer) makes the drone drift away.
     """
     return model.key("hover").ctrl.copy()
 
 
 def off_control(model: mujoco.MjModel, _data: mujoco.MjData) -> np.ndarray:
-    """Moteurs coupés : le drone tombe."""
+    """Motors off: the drone falls."""
     return np.zeros(model.nu)
 
 
 @dataclass
 class AltitudePIDParams:
-    """Consigne et gains du PID d'altitude.
+    """Setpoint and gains of the altitude PID.
 
-    Les gains sont exprimés en accélération (m/s² par m d'erreur, etc.) : ils
-    sont multipliés par la masse du drone, donc ne dépendent pas de celle-ci.
+    Gains are expressed as accelerations (m/s² per m of error, etc.): they
+    are multiplied by the drone's mass, so they don't depend on it.
     """
 
     target_altitude: float = 1.0  # m
     kp: float = 9.0
     ki: float = 3.0
     kd: float = 6.0
-    integral_limit: float = 2.0  # m·s, borne l'intégrale (anti-windup)
-    max_vertical_speed: float = 0.5  # m/s, vitesse à laquelle la consigne rejoint la cible
+    integral_limit: float = 2.0  # m·s, bounds the integral (anti-windup)
+    max_vertical_speed: float = 0.5  # m/s, speed at which the setpoint moves toward the target
 
 
 class AltitudePID:
-    """Maintient le drone à une altitude cible, par un PID sur la poussée totale.
+    """Holds the drone at a target altitude, with a PID on the total thrust.
 
-    La poussée totale est répartie également sur les 4 rotors : le PID ne
-    corrige que l'altitude, pas l'attitude. Si le drone est incliné (ex.
-    perturbation en rotation dans le viewer), il reste incliné et dérive
-    horizontalement — ce sera le rôle d'un correcteur d'attitude.
+    The total thrust is split equally across the 4 rotors: the PID only
+    corrects altitude, not attitude. If the drone is tilted (e.g. a
+    rotational disturbance in the viewer), it stays tilted and drifts
+    sideways; that is the job of an attitude controller.
 
-    Poussée totale = m * (g + kp * e + ki * ∫e + kd * (vz_cible - vz)), avec e = z_cible - z :
-    - le terme m * g (feedforward) compense le poids, le PID n'a plus qu'à
-      corriger l'écart ;
-    - le terme dérivé porte sur l'écart de vitesse (vitesse de la consigne -
-      vitesse mesurée) : pas d'à-coup quand la cible change, et il ne freine
-      pas la montée pendant la rampe ;
-    - la consigne z_cible ne saute pas directement à `target_altitude` : elle
-      la rejoint à `max_vertical_speed`. Sans cette rampe, une grande montée
-      remplit l'intégrale et le drone dépasse nettement la cible (~13 % pour
-      0.3 → 1 m).
+    Total thrust = m * (g + kp * e + ki * ∫e + kd * (vz_ref - vz)), with e = z_ref - z:
+    - the m * g term (feedforward) balances the weight, so the PID only has
+      to correct the error;
+    - the derivative term acts on the velocity error (setpoint velocity -
+      measured velocity): no kick when the target changes, and it doesn't
+      slow down the climb during the ramp;
+    - the setpoint z_ref doesn't jump straight to `target_altitude`: it
+      moves toward it at `max_vertical_speed`. Without this ramp, a long
+      climb fills the integral and the drone clearly overshoots the target
+      (~13 % for 0.3 → 1 m).
     """
 
     def __init__(self, model: mujoco.MjModel, params: AltitudePIDParams) -> None:
         self.params = params
-        self.mass = model.body_mass[model.body("x2").id]  # drone seul : une éventuelle charge est inconnue
+        self.mass = model.body_mass[model.body("x2").id]  # drone alone: any payload is unknown
         self.gravity = -model.opt.gravity[2]
         self.dt = model.opt.timestep
         self.integral = 0.0
-        self.reference: float | None = None  # consigne courante, initialisée à l'altitude de départ
+        self.reference: float | None = None  # current setpoint, initialized to the starting altitude
 
     def __call__(self, model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
         p = self.params
-        # le freejoint est le premier joint : qpos[2] est l'altitude, qvel[2] la vitesse verticale (repère monde)
+        # the freejoint is the first joint: qpos[2] is the altitude, qvel[2] the vertical speed (world frame)
         altitude, vertical_speed = data.qpos[2], data.qvel[2]
 
         if self.reference is None:
@@ -295,10 +295,10 @@ class AltitudePID:
 
 @dataclass
 class PositionControllerParams:
-    """Gains du contrôleur de position (boucle externe) et d'attitude (boucle interne).
+    """Gains of the position controller (outer loop) and attitude controller (inner loop).
 
-    Comme pour `AltitudePIDParams`, les gains sont exprimés en accélération
-    (linéaire ou angulaire) : ils sont multipliés par la masse ou l'inertie.
+    As in `AltitudePIDParams`, gains are expressed as accelerations (linear
+    or angular): they are multiplied by the mass or the inertia.
     """
 
     kp_xy: float = 6.0
@@ -307,53 +307,53 @@ class PositionControllerParams:
     kp_z: float = 9.0
     ki_z: float = 3.0
     kd_z: float = 6.0
-    # m·s, par axe (anti-windup). Borne aussi la charge inconnue compensable : ki_z * limite * masse du drone
-    # = 24 N, soit ~2.4 kg (avec 2.0, le drone ne portait pas plus de ~0.8 kg)
+    # m·s, per axis (anti-windup). Also bounds the unknown load that can be compensated:
+    # ki_z * limit * drone mass = 24 N, i.e. ~2.4 kg (with 2.0, the drone couldn't carry more than ~0.8 kg)
     integral_limit: float = 6.0
-    # L'intégrale se vide `integral_unwind_gain` fois plus vite qu'elle ne se remplit (quand l'erreur change de
-    # signe). Après avoir tiré sur une corde ancrée vers une cible hors de portée, elle est pleine ; sans
-    # décharge rapide, le drone restait à ~60 cm de la cible 8 s après qu'elle était redevenue atteignable.
+    # The integral empties `integral_unwind_gain` times faster than it fills (when the error changes sign).
+    # After pulling on a tethered rope toward an unreachable target, it is full; without fast unwinding,
+    # the drone was still ~60 cm off the target 8 s after it became reachable again.
     integral_unwind_gain: float = 10.0
-    max_speed: float = 1.0  # m/s, vitesse à laquelle la consigne rejoint la cible
-    max_acceleration: float = 1.0  # m/s², accélération/freinage de la consigne
-    max_tilt: float = np.deg2rad(30)  # inclinaison maximale demandée au drone
-    kp_attitude: float = 100.0  # rad/s² par rad d'erreur d'orientation
-    kd_attitude: float = 20.0  # rad/s² par rad/s de vitesse angulaire
+    max_speed: float = 1.0  # m/s, speed at which the setpoint moves toward the target
+    max_acceleration: float = 1.0  # m/s², acceleration/braking of the setpoint
+    max_tilt: float = np.deg2rad(30)  # maximum tilt requested from the drone
+    kp_attitude: float = 100.0  # rad/s² per rad of orientation error
+    kd_attitude: float = 20.0  # rad/s² per rad/s of angular velocity
 
 
 class PositionController:
-    """Amène le drone à la position et au cap (lacet) du corps mocap "target".
+    """Brings the drone to the position and heading (yaw) of the "target" mocap body.
 
-    Contrôle en cascade, comme sur les autopilotes de drones réels :
-    1. boucle externe (position) : la consigne suit une trajectoire douce
-       vers la cible (`update_reference`), un PID par axe donne
-       l'accélération voulue, à laquelle on ajoute g pour compenser le poids ;
-    2. cette accélération fixe à la fois la poussée totale et l'orientation
-       voulue : le drone doit incliner son axe z dans la direction de
-       l'accélération (c'est en s'inclinant qu'il se déplace latéralement),
-       puis tourner autour de cet axe pour atteindre le cap visé ;
-    3. boucle interne (attitude) : un PD sur l'erreur d'orientation donne les
-       couples de roulis, tangage et lacet (contrôleur géométrique de Lee et
-       al., 2010, qui reste valable pour les grands angles) ;
-    4. mixage : la poussée totale et les 3 couples sont convertis en poussées
-       des 4 rotors en inversant la matrice d'allocation, calculée depuis la
-       position des rotors dans x2.xml.
+    Cascaded control, as on real drone autopilots:
+    1. outer loop (position): the setpoint follows a smooth trajectory
+       toward the target (`update_reference`), a PID per axis gives the
+       desired acceleration, to which g is added to balance the weight;
+    2. this acceleration sets both the total thrust and the desired
+       attitude: the drone must tilt its z axis along the acceleration (it
+       moves sideways by tilting), then rotate around that axis to reach
+       the target heading;
+    3. inner loop (attitude): a PD on the orientation error gives the roll,
+       pitch and yaw torques (geometric controller of Lee et al., 2010,
+       which stays valid at large angles);
+    4. mixing: the total thrust and the 3 torques are converted into the 4
+       rotor thrusts by inverting the allocation matrix, computed from the
+       rotor positions in x2.xml.
 
-    La boucle interne doit être nettement plus rapide que la boucle externe
-    (ici ~10 rad/s contre ~2.5 rad/s) : la boucle externe suppose que le drone
-    prend quasi instantanément l'orientation demandée.
+    The inner loop must be much faster than the outer loop (here ~10 rad/s
+    against ~2.5 rad/s): the outer loop assumes that the drone reaches the
+    requested attitude almost instantly.
     """
 
     def __init__(self, model: mujoco.MjModel, params: PositionControllerParams) -> None:
         self.params = params
         self.body_id = model.body("x2").id
         self.target_mocap_id = model.body("target").mocapid[0]
-        self.mass = model.body_mass[self.body_id]  # drone seul : une éventuelle charge est inconnue
+        self.mass = model.body_mass[self.body_id]  # drone alone: any payload is unknown
         self.gravity = -model.opt.gravity[2]
         self.dt = model.opt.timestep
 
-        # tenseur d'inertie dans le repère du drone : MuJoCo le stocke diagonalisé
-        # (body_inertia) dans un repère principal tourné de body_iquat
+        # inertia tensor in the drone frame: MuJoCo stores it diagonalized
+        # (body_inertia) in a principal frame rotated by body_iquat
         principal_axes = np.zeros(9)
         mujoco.mju_quat2Mat(principal_axes, model.body_iquat[self.body_id])
         principal_axes = principal_axes.reshape(3, 3)
@@ -361,18 +361,18 @@ class PositionController:
 
         self.allocation_inv = np.linalg.inv(self.allocation_matrix(model, self.body_id))
 
-        self.reference: np.ndarray | None = None  # consigne courante, initialisée à la position de départ
+        self.reference: np.ndarray | None = None  # current setpoint, initialized to the starting position
         self.reference_velocity = np.zeros(3)
         self.integral = np.zeros(3)
-        self.thrust_saturated = False  # moteurs saturés au pas précédent (voir `mix`), gèle l'intégrale
+        self.thrust_saturated = False  # motors saturated at the previous step (see `mix`), freezes the integral
 
     @staticmethod
     def allocation_matrix(model: mujoco.MjModel, body_id: int) -> np.ndarray:
-        """Matrice 4x4 : poussées des rotors -> [poussée totale, couple x, couple y, couple z] (repère drone).
+        """4x4 matrix: rotor thrusts -> [total thrust, torque x, torque y, torque z] (drone frame).
 
-        Les couples sont pris autour du centre de masse. Chaque rotor pousse
-        selon z et crée un couple de lacet par réaction (6e composante de
-        `gear`), de sens alterné d'un rotor à l'autre.
+        Torques are taken about the center of mass. Each rotor pushes along
+        z and creates a yaw reaction torque (6th component of `gear`), whose
+        direction alternates from one rotor to the next.
         """
         center_of_mass = model.body_ipos[body_id]
         columns = []
@@ -386,21 +386,22 @@ class PositionController:
 
     def __call__(self, model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
         p = self.params
-        # freejoint (premier joint) : qpos[:3] position (monde), qvel[:3] vitesse linéaire (monde), qvel[3:] vitesse angulaire (repère drone)
+        # freejoint (first joint): qpos[:3] position (world), qvel[:3] linear velocity (world),
+        # qvel[3:] angular velocity (drone frame)
         position, velocity, angular_velocity = data.qpos[:3], data.qvel[:3], data.qvel[3:6]
-        rotation = data.xmat[self.body_id].reshape(3, 3)  # colonnes = axes x, y, z du drone dans le repère monde
+        rotation = data.xmat[self.body_id].reshape(3, 3)  # columns = drone x, y, z axes in the world frame
 
         target = data.mocap_pos[self.target_mocap_id]
         w, x, y, z = data.mocap_quat[self.target_mocap_id]
         target_yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2))
 
-        # 1. trajectoire de consigne vers la cible, puis PID de position
+        # 1. setpoint trajectory toward the target, then position PID
         reference_acceleration = self.update_reference(position, target)
 
         error = self.reference - position
         previous_integral = self.integral
         integral_step = error * self.dt
-        unwinding = integral_step * self.integral < 0  # par axe : l'erreur s'oppose à l'intégrale accumulée
+        unwinding = integral_step * self.integral < 0  # per axis: the error opposes the accumulated integral
         integral_step = np.where(unwinding, p.integral_unwind_gain * integral_step, integral_step)
         self.integral = np.clip(self.integral + integral_step, -p.integral_limit, p.integral_limit)
 
@@ -412,21 +413,21 @@ class PositionController:
         )
         acceleration[2] += self.gravity
 
-        # l'inclinaison nécessaire est atan(a_horizontale / a_verticale) : on borne la partie horizontale
-        acceleration[2] = max(acceleration[2], 0.2 * self.gravity)  # toujours pousser un minimum vers le haut
+        # the required tilt is atan(a_horizontal / a_vertical): the horizontal part is bounded
+        acceleration[2] = max(acceleration[2], 0.2 * self.gravity)  # always push upward a little
         horizontal = acceleration[:2]
         max_horizontal = acceleration[2] * np.tan(p.max_tilt)
         tilt_limited = np.linalg.norm(horizontal) > max_horizontal
         if tilt_limited:
             acceleration[:2] = horizontal * (max_horizontal / np.linalg.norm(horizontal))
 
-        # anti-windup : quand la commande est saturée (inclinaison bornée ou moteurs au maximum), l'erreur
-        # ne peut pas se résorber (ex. cible hors de portée d'une corde ancrée) et l'intégrale grossirait
-        # jusqu'à sa borne ; au retour d'une cible atteignable, le drone mettait alors plus de 8 s à se recaler
+        # anti-windup: when the command is saturated (tilt bounded or motors at maximum), the error
+        # can't be reduced (e.g. target out of reach of a tethered rope) and the integral would grow up
+        # to its limit; when the target became reachable again, the drone took more than 8 s to settle
         if tilt_limited or self.thrust_saturated:
             self.integral = previous_integral
 
-        # 2. poussée totale (projetée sur l'axe z actuel du drone) et orientation voulue
+        # 2. total thrust (projected on the drone's current z axis) and desired attitude
         thrust = self.mass * acceleration @ rotation[:, 2]
         z_desired = acceleration / np.linalg.norm(acceleration)
         heading = np.array([np.cos(target_yaw), np.sin(target_yaw), 0.0])
@@ -435,25 +436,25 @@ class PositionController:
         x_desired = np.cross(y_desired, z_desired)
         rotation_desired = np.column_stack([x_desired, y_desired, z_desired])
 
-        # 3. PD d'attitude : erreur d'orientation e_R = 1/2 vee(R_d^T R - R^T R_d)
+        # 3. attitude PD: orientation error e_R = 1/2 vee(R_d^T R - R^T R_d)
         error_matrix = rotation_desired.T @ rotation - rotation.T @ rotation_desired
         attitude_error = 0.5 * np.array([error_matrix[2, 1], error_matrix[0, 2], error_matrix[1, 0]])
         angular_acceleration = -p.kp_attitude * attitude_error - p.kd_attitude * angular_velocity
         torque = self.inertia @ angular_acceleration + np.cross(angular_velocity, self.inertia @ angular_velocity)
 
-        # 4. mixage vers les 4 rotors
+        # 4. mixing to the 4 rotors
         return self.mix(model, thrust, torque)
 
     def update_reference(self, position: np.ndarray, target: np.ndarray) -> np.ndarray:
-        """Fait avancer la consigne vers la cible (vitesse et accélération bornées), renvoie son accélération.
+        """Move the setpoint toward the target (bounded speed and acceleration), return its acceleration.
 
-        La cible peut sauter d'un coup (déplacement dans le viewer) : suivre
-        directement ce saut ferait basculer violemment le drone. La consigne
-        la rejoint donc à `max_speed` au plus, accélère et freine à
-        `max_acceleration` (vitesse visée v = sqrt(2 a d) près de la cible).
-        L'accélération renvoyée sert d'anticipation (feedforward) : sans
-        elle, le drone réagit en retard aux changements de vitesse de la
-        consigne et dépasse la cible d'environ 20 cm.
+        The target can jump (dragged in the viewer): following that jump
+        directly would violently flip the drone. The setpoint therefore
+        moves toward it at `max_speed` at most, and accelerates and brakes
+        at `max_acceleration` (wanted speed v = sqrt(2 a d) near the target).
+        The returned acceleration is used as a feedforward term: without
+        it, the drone lags behind the setpoint's speed changes and
+        overshoots the target by ~20 cm.
         """
         p = self.params
         if self.reference is None:
@@ -477,7 +478,7 @@ class PositionController:
         self.reference_velocity += velocity_change
         step = self.reference_velocity * self.dt
         if distance < 1e-6 or np.linalg.norm(step) >= distance:
-            # arrivée : on se cale exactement sur la cible
+            # arrival: snap exactly onto the target
             self.reference = target.copy()
             self.reference_velocity = np.zeros(3)
             return np.zeros(3)
@@ -485,30 +486,30 @@ class PositionController:
         return velocity_change / self.dt
 
     def mix(self, model: mujoco.MjModel, thrust: float, torque: np.ndarray) -> np.ndarray:
-        """Convertit poussée totale + couples en poussées des rotors, avec des priorités en cas de saturation.
+        """Convert total thrust + torques into rotor thrusts, with priorities when saturated.
 
-        Priorité 1, roulis/tangage, avant la poussée totale : si un rotor
-        dépasse sa poussée maximale, on baisse la poussée de tous les rotors
-        du même montant, ce qui conserve les écarts entre rotors, donc les
-        couples. Écrêter chaque rotor séparément détruirait ces écarts : le
-        drone, tirant de toutes ses forces sur une corde ancrée, restait
-        bloqué incliné à 43°.
+        Priority 1, roll/pitch before total thrust: if a rotor exceeds its
+        maximum thrust, all rotors are lowered by the same amount, which
+        keeps the differences between rotors, hence the torques. Clipping
+        each rotor on its own would destroy those differences: pulling with
+        all its strength on a tethered rope, the drone stayed stuck at a 43°
+        tilt.
 
-        Priorité 2, poussée et roulis/tangage avant le lacet. Le lacet n'est produit que par le couple de réaction des hélices
-        (~0.02 N·m par N de poussée) : il demande de très grands écarts de
-        poussée entre rotors. Sans précaution, un grand changement de cap
-        exige des poussées négatives, ramenées à 0 par la saturation, ce qui
-        fausse la poussée totale et le roulis/tangage (le drone s'envolait à
-        7 m lors d'un virage de 90°). Comme sur les autopilotes réels, le
-        couple de lacet est donc réduit juste assez pour que les poussées
-        restent dans les limites des moteurs : poussée et roulis/tangage
-        sont prioritaires, le virage se fait simplement plus lentement.
+        Priority 2, thrust and roll/pitch before yaw. Yaw is only produced
+        by the propellers' reaction torque (~0.02 N·m per N of thrust): it
+        needs very large thrust differences between rotors. Without care, a
+        large heading change requires negative thrusts, clipped to 0 by
+        saturation, which corrupts the total thrust and roll/pitch (the
+        drone flew up to 7 m during a 90° turn). As on real autopilots, the
+        yaw torque is therefore reduced just enough to keep the thrusts
+        within the motor limits: thrust and roll/pitch take priority, the
+        turn is simply slower.
         """
         low, high = model.actuator_ctrlrange.T
         without_yaw = self.allocation_inv @ np.array([thrust, torque[0], torque[1], 0.0])
 
-        # priorité 1 : baisser la poussée totale juste assez pour que le rotor le plus chargé tienne
-        collective = self.allocation_inv[:, 0]  # part de chaque rotor dans 1 N de poussée totale
+        # priority 1: lower the total thrust just enough for the most loaded rotor to fit
+        collective = self.allocation_inv[:, 0]  # share of each rotor in 1 N of total thrust
         excess = np.max((without_yaw - high) / collective)
         self.thrust_saturated = excess > 0
         if self.thrust_saturated:
@@ -516,7 +517,7 @@ class PositionController:
 
         yaw_only = self.allocation_inv @ np.array([0.0, 0.0, 0.0, torque[2]])
 
-        # plus grande fraction s de lacet telle que low <= without_yaw + s * yaw_only <= high
+        # largest yaw fraction s such that low <= without_yaw + s * yaw_only <= high
         scale = 1.0
         for base, delta, lo, hi in zip(without_yaw, yaw_only, low, high):
             if delta > 0:
@@ -526,7 +527,7 @@ class PositionController:
         return without_yaw + max(scale, 0.0) * yaw_only
 
 
-# Chaque entrée construit la loi de commande à partir du modèle et des arguments de la ligne de commande.
+# Each entry builds the control law from the model and the command-line arguments.
 CONTROLLERS: dict[str, Callable[[mujoco.MjModel, argparse.Namespace], Controller]] = {
     "hover": lambda _model, _args: hover_control,
     "off": lambda _model, _args: off_control,
@@ -539,12 +540,12 @@ def run_simulation(model: mujoco.MjModel, data: mujoco.MjData, control_fn: Contr
     ctrl_low, ctrl_high = model.actuator_ctrlrange.T
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        # caméra qui suit le drone tout en restant pilotable à la souris (zoom, rotation)
+        # camera that follows the drone while staying mouse-controllable (zoom, rotation)
         viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
         viewer.cam.trackbodyid = model.body("x2").id
-        viewer.cam.distance = 1.5  # zoom sur le drone
-        viewer.cam.azimuth = 180  # vue de derrière le drone
-        viewer.cam.elevation = -20.0  # angle de surplomb (négatif = au dessus)
+        viewer.cam.distance = 1.5  # zoom on the drone
+        viewer.cam.azimuth = 180  # view from behind the drone
+        viewer.cam.elevation = -20.0  # viewing angle (negative = from above)
 
         while viewer.is_running():
             step_start = time.time()
@@ -566,13 +567,13 @@ def parse_args() -> argparse.Namespace:
         "--controller",
         choices=sorted(CONTROLLERS),
         default="hover",
-        help="loi de commande utilisée pendant la simulation",
+        help="control law used during the simulation",
     )
     parser.add_argument(
         "--target-altitude",
         type=float,
         default=AltitudePIDParams.target_altitude,
-        help="altitude cible en mètres (contrôleur altitude)",
+        help="target altitude in meters (altitude controller)",
     )
     parser.add_argument(
         "--target-position",
@@ -580,65 +581,65 @@ def parse_args() -> argparse.Namespace:
         nargs=3,
         metavar=("X", "Y", "Z"),
         default=None,
-        help="position initiale de la cible en mètres (contrôleur position), déplaçable ensuite dans le viewer",
+        help="initial target position in meters (position controller), can then be moved in the viewer",
     )
     parser.add_argument(
         "--payload",
         action="store_true",
-        help="suspend une charge sous le drone (tige + sphère, liaison rotule), inconnue des contrôleurs",
+        help="hang a load under the drone (rod + sphere, ball joint), unknown to the controllers",
     )
     parser.add_argument(
         "--rod-count",
         type=int,
         default=PayloadParams.rod_count,
-        help="nombre de tiges reliées par des rotules (1 = pendule, 2 = double pendule ; avec --payload)",
+        help="number of rods linked by ball joints (1 = pendulum, 2 = double pendulum; with --payload)",
     )
     parser.add_argument(
         "--payload-mass",
         type=float,
         default=PayloadParams.sphere_mass,
-        help="masse de la sphère en kg (avec --payload)",
+        help="mass of the sphere in kg (with --payload)",
     )
     parser.add_argument(
         "--rod-length",
         type=float,
         default=PayloadParams.rod_length,
-        help="longueur de chaque tige en mètres (avec --payload)",
+        help="length of each rod in meters (with --payload)",
     )
     parser.add_argument(
         "--rope",
         action="store_true",
-        help="accroche une corde souple sous le drone (masse répartie, posée en partie au sol au départ)",
+        help="attach a flexible rope under the drone (mass spread evenly, partly lying on the ground at start)",
     )
     parser.add_argument(
         "--rope-anchor",
         action="store_true",
-        help="épingle l'autre extrémité de la corde au sol (avec --rope)",
+        help="pin the other end of the rope to the ground (with --rope)",
     )
     parser.add_argument(
         "--rope-length",
         type=float,
         default=None,
-        help=f"longueur de la corde en mètres (avec --rope ; défaut {RopeParams.length} m, "
-        f"{ANCHORED_ROPE_LENGTH} m avec --rope-anchor)",
+        help=f"rope length in meters (with --rope; default {RopeParams.length} m, "
+        f"{ANCHORED_ROPE_LENGTH} m with --rope-anchor)",
     )
     parser.add_argument(
-        "--rope-mass", type=float, default=RopeParams.mass, help="masse totale de la corde en kg (avec --rope)"
+        "--rope-mass", type=float, default=RopeParams.mass, help="total rope mass in kg (with --rope)"
     )
     parser.add_argument(
         "--rope-points",
         type=int,
         default=RopeParams.point_count,
-        help="nombre de points matériels de la corde (avec --rope)",
+        help="number of point masses in the rope (with --rope)",
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="affiche la position et les poussées à chaque pas de temps"
+        "-v", "--verbose", action="store_true", help="print position and rotor thrusts at each step"
     )
     args = parser.parse_args()
     if args.payload and args.rope:
-        parser.error("--payload et --rope sont exclusifs : choisir l'un ou l'autre")
+        parser.error("--payload and --rope are mutually exclusive: choose one")
     if args.rope_anchor and not args.rope:
-        parser.error("--rope-anchor s'utilise avec --rope")
+        parser.error("--rope-anchor requires --rope")
     if args.rope_length is None:
         args.rope_length = ANCHORED_ROPE_LENGTH if args.rope_anchor else RopeParams.length
     return args
@@ -662,18 +663,18 @@ def main() -> None:
     )
     model = build_model(payload, rope)
     data = mujoco.MjData(model)
-    mujoco.mj_resetDataKeyframe(model, data, model.key("hover").id)  # drone à 30 cm du sol (plus haut avec charge)
+    mujoco.mj_resetDataKeyframe(model, data, model.key("hover").id)  # drone 30 cm above the ground (higher with a load)
     target_mocap_id = model.body("target").mocapid[0]
     if args.target_position is not None:
         data.mocap_pos[target_mocap_id] = args.target_position
     elif rope is not None and rope.anchored:
-        # corde ancrée : la cible à la verticale du départ serait hors de portée (corde tendue dès le
-        # départ), on la place à mi-chemin entre le drone et l'ancre, à 1 m de haut
+        # tethered rope: a target straight above the start would be out of reach (rope taut from the
+        # start), so it is placed halfway between the drone and the anchor, 1 m high
         anchor = model.geom("rope_anchor").pos
         data.mocap_pos[target_mocap_id] = [(data.qpos[0] + anchor[0]) / 2, (data.qpos[1] + anchor[1]) / 2, 1.0]
     else:
-        # cible par défaut (scene.xml) au moins 40 cm au-dessus de la longueur de la charge : sinon elle
-        # toucherait le sol (le drone s'affaisse au décollage, la charge lui étant inconnue)
+        # default target (scene.xml) at least 40 cm above the load length: otherwise the load would
+        # touch the ground (the drone sags at takeoff, since the load is unknown to it)
         load_length = payload.total_length if payload else rope.length if rope else 0.0
         data.mocap_pos[target_mocap_id, 2] = max(data.mocap_pos[target_mocap_id, 2], load_length + 0.4)
 
