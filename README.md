@@ -17,8 +17,8 @@ The drone model (`x2.xml`, `scene.xml`, `assets/`) comes from [MuJoCo Menagerie]
 Dependencies are managed with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone https://github.com/elcocogo/CabledDrone.git
-cd CabledDrone
+git clone https://github.com/elcocogo/cabled-drone.git
+cd cabled-drone
 uv sync
 ```
 
